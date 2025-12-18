@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+validator/node_modules/
+
+# Build outputs
+dist/
+validator/dist/
+artifacts/
+cache/
+typechain-types/
+
+# Environment files (contain secrets)
+.env
+.env.local
+.env.*.local
+validator/.env
+
+# Database files
+validator/data/
+*.db
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage/
+
+# Hardhat
+hardhat-deployments/
+
+# Claude
+.claude/

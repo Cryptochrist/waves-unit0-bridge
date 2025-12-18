@@ -1,0 +1,495 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+# ============================================================================
+# WAVES-Unit0 Custom Token Bridge
+# ============================================================================
+# This dApp enables cross-chain transfers of custom tokens between WAVES and Unit0.
+# It uses M-of-N multisig validation from a set of validators.
+# ============================================================================
+
+# ============ Constants ============
+
+let UNIT0_CHAIN_ID = 88817  # Unit0 mainnet chain ID (update as needed)
+let MIN_WAVES_ADDRESS_LENGTH = 35
+let MAX_VALIDATORS = 20
+let SEPARATOR = "|"
+
+# ============ Error Messages ============
+
+let ERR_NOT_INITIALIZED = "Bridge not initialized"
+let ERR_ALREADY_INITIALIZED = "Bridge already initialized"
+let ERR_INVALID_CALLER = "Invalid caller"
+let ERR_INVALID_ADDRESS = "Invalid address"
+let ERR_INVALID_AMOUNT = "Invalid amount"
+let ERR_TOKEN_NOT_REGISTERED = "Token not registered"
+let ERR_TOKEN_PAUSED = "Token is paused"
+let ERR_ALREADY_PROCESSED = "Transfer already processed"
+let ERR_INSUFFICIENT_SIGNATURES = "Insufficient valid signatures"
+let ERR_INVALID_SIGNATURE = "Invalid signature"
+let ERR_DAILY_LIMIT_EXCEEDED = "Daily limit exceeded"
+let ERR_BRIDGE_PAUSED = "Bridge is paused"
+
+# ============ Key Functions ============
+
+func keyInitialized() = "initialized"
+func keyOwner() = "owner"
+func keyPaused() = "paused"
+
+# Validator keys
+func keyValidatorList() = "validators"
+func keyValidatorCount() = "validatorCount"
+func keyValidatorThreshold() = "threshold"
+func keyValidator(pubKey: String) = "validator_" + pubKey
+
+# Token registry keys
+func keyTokenMapping(assetId: String) = "token_map_" + assetId
+func keyIsWrapped(assetId: String) = "is_wrapped_" + assetId
+func keyTokenPaused(assetId: String) = "token_paused_" + assetId
+func keyTokenDailyLimit(assetId: String) = "daily_limit_" + assetId
+func keyTokenDailyTransferred(assetId: String, day: Int) = "daily_transferred_" + assetId + "_" + day.toString()
+
+# Transfer tracking keys
+func keyProcessedTransfer(transferId: String) = "processed_" + transferId
+func keyLock(lockId: String) = "lock_" + lockId
+func keyOutboundNonce() = "outboundNonce"
+
+# Fee keys
+func keyBridgeFeePercent() = "bridgeFeePercent"
+func keyValidatorFeePercent() = "validatorFeePercent"
+func keyTreasury() = "treasury"
+
+# ============ Helper Functions ============
+
+func isInitialized() = {
+    getBoolean(keyInitialized()).valueOrElse(false)
+}
+
+func isPaused() = {
+    getBoolean(keyPaused()).valueOrElse(false)
+}
+
+func getOwner() = {
+    getString(keyOwner()).valueOrErrorMessage(ERR_NOT_INITIALIZED)
+}
+
+func getValidatorThreshold() = {
+    getInteger(keyValidatorThreshold()).valueOrElse(0)
+}
+
+func getValidatorCount() = {
+    getInteger(keyValidatorCount()).valueOrElse(0)
+}
+
+func isValidator(pubKey: String) = {
+    getBoolean(keyValidator(pubKey)).valueOrElse(false)
+}
+
+func getOutboundNonce() = {
+    getInteger(keyOutboundNonce()).valueOrElse(0)
+}
+
+func getBridgeFee() = {
+    getInteger(keyBridgeFeePercent()).valueOrElse(10)  # Default 0.1%
+}
+
+func getValidatorFee() = {
+    getInteger(keyValidatorFeePercent()).valueOrElse(5)  # Default 0.05%
+}
+
+func getTreasury() = {
+    getString(keyTreasury()).valueOrElse(getOwner())
+}
+
+func getCurrentDay() = {
+    lastBlock.timestamp / (24 * 60 * 60 * 1000)  # Day in milliseconds
+}
+
+func assetIdToString(assetId: ByteVector|Unit) = {
+    match assetId {
+        case id: ByteVector => id.toBase58String()
+        case _ => "WAVES"
+    }
+}
+
+func stringToAssetId(str: String) = {
+    if str == "WAVES" then unit else str.fromBase58String()
+}
+
+# ============ Token Registry Functions ============
+
+func isTokenRegistered(assetId: String) = {
+    getString(keyTokenMapping(assetId)).isDefined()
+}
+
+func isTokenPaused(assetId: String) = {
+    getBoolean(keyTokenPaused(assetId)).valueOrElse(false)
+}
+
+func getTokenMapping(assetId: String) = {
+    getString(keyTokenMapping(assetId)).valueOrErrorMessage(ERR_TOKEN_NOT_REGISTERED)
+}
+
+func getDailyLimit(assetId: String) = {
+    getInteger(keyTokenDailyLimit(assetId)).valueOrElse(0)
+}
+
+func getDailyTransferred(assetId: String) = {
+    let day = getCurrentDay()
+    getInteger(keyTokenDailyTransferred(assetId, day)).valueOrElse(0)
+}
+
+# ============ Signature Verification ============
+
+func verifySignature(message: ByteVector, signature: ByteVector, publicKey: ByteVector) = {
+    sigVerify(message, signature, publicKey)
+}
+
+func countValidSignatures(
+    messageHash: ByteVector,
+    signatures: List[ByteVector],
+    publicKeys: List[ByteVector]
+) = {
+    let sigCount = signatures.size()
+    let pubKeyCount = publicKeys.size()
+
+    if sigCount != pubKeyCount then 0
+    else {
+        func countValid(acc: Int, idx: Int) = {
+            if idx >= sigCount then acc
+            else {
+                let sig = signatures[idx]
+                let pubKey = publicKeys[idx]
+                let pubKeyStr = pubKey.toBase58String()
+
+                if !isValidator(pubKeyStr) then acc
+                else if !sigVerify(messageHash, sig, pubKey) then acc
+                else acc + 1
+            }
+        }
+
+        FOLD<20>(
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+            0,
+            countValid
+        )
+    }
+}
+
+# ============ Initialization ============
+
+@Callable(i)
+func initialize(
+    owner: String,
+    threshold: Int,
+    treasury: String,
+    validatorPubKeys: List[String]
+) = {
+    if isInitialized() then throw(ERR_ALREADY_INITIALIZED)
+    else if threshold <= 0 then throw("Invalid threshold")
+    else if validatorPubKeys.size() < threshold then throw("Not enough validators")
+    else {
+        let validatorCount = validatorPubKeys.size()
+
+        # Create validator entries
+        func addValidator(acc: List[StringEntry|BooleanEntry], pubKey: String) = {
+            acc ++ [BooleanEntry(keyValidator(pubKey), true)]
+        }
+
+        let validatorEntries = FOLD<20>(validatorPubKeys, [], addValidator)
+
+        [
+            BooleanEntry(keyInitialized(), true),
+            StringEntry(keyOwner(), owner),
+            StringEntry(keyTreasury(), treasury),
+            IntegerEntry(keyValidatorThreshold(), threshold),
+            IntegerEntry(keyValidatorCount(), validatorCount),
+            StringEntry(keyValidatorList(), makeString(validatorPubKeys, ",")),
+            IntegerEntry(keyBridgeFeePercent(), 10),
+            IntegerEntry(keyValidatorFeePercent(), 5),
+            IntegerEntry(keyOutboundNonce(), 0),
+            BooleanEntry(keyPaused(), false)
+        ] ++ validatorEntries
+    }
+}
+
+# ============ Lock Tokens (WAVES -> Unit0) ============
+
+@Callable(i)
+func lockTokens(destinationAddress: String, destinationChainId: Int) = {
+    if !isInitialized() then throw(ERR_NOT_INITIALIZED)
+    else if isPaused() then throw(ERR_BRIDGE_PAUSED)
+    else if destinationAddress.size() < 40 then throw(ERR_INVALID_ADDRESS)  # Ethereum address length
+    else if i.payments.size() != 1 then throw("Exactly one payment required")
+    else {
+        let payment = i.payments[0]
+        let amount = payment.amount
+        let assetId = assetIdToString(payment.assetId)
+
+        if amount <= 0 then throw(ERR_INVALID_AMOUNT)
+        else if !isTokenRegistered(assetId) then throw(ERR_TOKEN_NOT_REGISTERED)
+        else if isTokenPaused(assetId) then throw(ERR_TOKEN_PAUSED)
+        else {
+            # Check daily limit
+            let dailyLimit = getDailyLimit(assetId)
+            let dailyTransferred = getDailyTransferred(assetId)
+            let day = getCurrentDay()
+
+            if dailyLimit > 0 && dailyTransferred + amount > dailyLimit then throw(ERR_DAILY_LIMIT_EXCEEDED)
+            else {
+                # Calculate fees
+                let bridgeFee = fraction(amount, getBridgeFee(), 10000)
+                let validatorFee = fraction(amount, getValidatorFee(), 10000)
+                let netAmount = amount - bridgeFee - validatorFee
+                let totalFee = bridgeFee + validatorFee
+
+                let nonce = getOutboundNonce()
+                let sender = i.caller.toString()
+                let timestamp = lastBlock.timestamp
+
+                # Generate lock ID
+                let lockIdData = sender + assetId + netAmount.toString() + destinationAddress + nonce.toString()
+                let lockId = sha256(lockIdData.toBytes()).toBase58String()
+
+                # Store lock details: assetId|amount|sender|destination|timestamp|nonce|chainId
+                let lockDetails = assetId + SEPARATOR + netAmount.toString() + SEPARATOR + sender + SEPARATOR + destinationAddress + SEPARATOR + timestamp.toString() + SEPARATOR + nonce.toString() + SEPARATOR + destinationChainId.toString()
+
+                # Transfer fees to treasury
+                let treasuryAddress = addressFromStringValue(getTreasury())
+                let feeTransfer = if totalFee > 0 then [ScriptTransfer(treasuryAddress, totalFee, payment.assetId)] else []
+
+                [
+                    StringEntry(keyLock(lockId), lockDetails),
+                    IntegerEntry(keyOutboundNonce(), nonce + 1),
+                    IntegerEntry(keyTokenDailyTransferred(assetId, day), dailyTransferred + amount)
+                ] ++ feeTransfer
+            }
+        }
+    }
+}
+
+# ============ Release Tokens (Unit0 -> WAVES) ============
+
+@Callable(i)
+func releaseTokens(
+    transferId: String,
+    recipient: String,
+    assetId: String,
+    amount: Int,
+    signatures: List[ByteVector],
+    publicKeys: List[ByteVector]
+) = {
+    if !isInitialized() then throw(ERR_NOT_INITIALIZED)
+    else if isPaused() then throw(ERR_BRIDGE_PAUSED)
+    else if getBoolean(keyProcessedTransfer(transferId)).valueOrElse(false) then throw(ERR_ALREADY_PROCESSED)
+    else if amount <= 0 then throw(ERR_INVALID_AMOUNT)
+    else {
+        # Create message hash for signature verification
+        let messageData = transferId + recipient + assetId + amount.toString() + UNIT0_CHAIN_ID.toString()
+        let messageHash = sha256(messageData.toBytes())
+
+        # Verify signatures
+        let validSignatures = countValidSignatures(messageHash, signatures, publicKeys)
+        let threshold = getValidatorThreshold()
+
+        if validSignatures < threshold then throw(ERR_INSUFFICIENT_SIGNATURES + ": " + validSignatures.toString() + "/" + threshold.toString())
+        else {
+            let recipientAddress = addressFromStringValue(recipient)
+            let asset = stringToAssetId(assetId)
+
+            # Check if this is a wrapped token (burn) or native token (transfer)
+            let isWrapped = getBoolean(keyIsWrapped(assetId)).valueOrElse(false)
+
+            if isWrapped then {
+                # For wrapped tokens, we issue them (they were burned on Unit0)
+                let tokenMapping = getTokenMapping(assetId)
+                # Note: In production, you'd use Reissue for reissuable assets
+                [
+                    BooleanEntry(keyProcessedTransfer(transferId), true),
+                    ScriptTransfer(recipientAddress, amount, asset)
+                ]
+            } else {
+                # For native WAVES tokens, transfer from bridge reserves
+                [
+                    BooleanEntry(keyProcessedTransfer(transferId), true),
+                    ScriptTransfer(recipientAddress, amount, asset)
+                ]
+            }
+        }
+    }
+}
+
+# ============ Token Registry Management ============
+
+@Callable(i)
+func registerToken(
+    wavesAssetId: String,
+    unit0Address: String,
+    isWrapped: Boolean,
+    decimals: Int,
+    name: String,
+    symbol: String
+) = {
+    let owner = getOwner()
+    if i.caller.toString() != owner then throw(ERR_INVALID_CALLER)
+    else if isTokenRegistered(wavesAssetId) then throw("Token already registered")
+    else {
+        # Token mapping format: unit0Address|decimals|name|symbol
+        let mappingData = unit0Address + SEPARATOR + decimals.toString() + SEPARATOR + name + SEPARATOR + symbol
+
+        [
+            StringEntry(keyTokenMapping(wavesAssetId), mappingData),
+            BooleanEntry(keyIsWrapped(wavesAssetId), isWrapped)
+        ]
+    }
+}
+
+@Callable(i)
+func setTokenPaused(assetId: String, paused: Boolean) = {
+    let owner = getOwner()
+    if i.caller.toString() != owner then throw(ERR_INVALID_CALLER)
+    else {
+        [BooleanEntry(keyTokenPaused(assetId), paused)]
+    }
+}
+
+@Callable(i)
+func setDailyLimit(assetId: String, limit: Int) = {
+    let owner = getOwner()
+    if i.caller.toString() != owner then throw(ERR_INVALID_CALLER)
+    else {
+        [IntegerEntry(keyTokenDailyLimit(assetId), limit)]
+    }
+}
+
+# ============ Validator Management ============
+
+@Callable(i)
+func addValidator(pubKey: String) = {
+    let owner = getOwner()
+    if i.caller.toString() != owner then throw(ERR_INVALID_CALLER)
+    else if isValidator(pubKey) then throw("Already a validator")
+    else {
+        let currentCount = getValidatorCount()
+        let currentList = getString(keyValidatorList()).valueOrElse("")
+        let newList = if currentList == "" then pubKey else currentList + "," + pubKey
+
+        [
+            BooleanEntry(keyValidator(pubKey), true),
+            IntegerEntry(keyValidatorCount(), currentCount + 1),
+            StringEntry(keyValidatorList(), newList)
+        ]
+    }
+}
+
+@Callable(i)
+func removeValidator(pubKey: String) = {
+    let owner = getOwner()
+    if i.caller.toString() != owner then throw(ERR_INVALID_CALLER)
+    else if !isValidator(pubKey) then throw("Not a validator")
+    else {
+        let currentCount = getValidatorCount()
+        let threshold = getValidatorThreshold()
+
+        if currentCount - 1 < threshold then throw("Would break threshold")
+        else {
+            [
+                BooleanEntry(keyValidator(pubKey), false),
+                IntegerEntry(keyValidatorCount(), currentCount - 1)
+            ]
+        }
+    }
+}
+
+@Callable(i)
+func setValidatorThreshold(threshold: Int) = {
+    let owner = getOwner()
+    if i.caller.toString() != owner then throw(ERR_INVALID_CALLER)
+    else if threshold <= 0 then throw("Invalid threshold")
+    else if threshold > getValidatorCount() then throw("Threshold exceeds validator count")
+    else {
+        [IntegerEntry(keyValidatorThreshold(), threshold)]
+    }
+}
+
+# ============ Admin Functions ============
+
+@Callable(i)
+func setBridgePaused(paused: Boolean) = {
+    let owner = getOwner()
+    if i.caller.toString() != owner then throw(ERR_INVALID_CALLER)
+    else {
+        [BooleanEntry(keyPaused(), paused)]
+    }
+}
+
+@Callable(i)
+func setFees(bridgeFeePercent: Int, validatorFeePercent: Int) = {
+    let owner = getOwner()
+    if i.caller.toString() != owner then throw(ERR_INVALID_CALLER)
+    else if bridgeFeePercent + validatorFeePercent > 1000 then throw("Fees too high")
+    else {
+        [
+            IntegerEntry(keyBridgeFeePercent(), bridgeFeePercent),
+            IntegerEntry(keyValidatorFeePercent(), validatorFeePercent)
+        ]
+    }
+}
+
+@Callable(i)
+func setTreasury(treasury: String) = {
+    let owner = getOwner()
+    if i.caller.toString() != owner then throw(ERR_INVALID_CALLER)
+    else {
+        [StringEntry(keyTreasury(), treasury)]
+    }
+}
+
+@Callable(i)
+func transferOwnership(newOwner: String) = {
+    let owner = getOwner()
+    if i.caller.toString() != owner then throw(ERR_INVALID_CALLER)
+    else {
+        [StringEntry(keyOwner(), newOwner)]
+    }
+}
+
+# ============ View Functions (via @Callable for state reads) ============
+
+@Callable(i)
+func getTransferStatus(transferId: String) = {
+    let processed = getBoolean(keyProcessedTransfer(transferId)).valueOrElse(false)
+    ([], processed)
+}
+
+@Callable(i)
+func getLockDetails(lockId: String) = {
+    let details = getString(keyLock(lockId)).valueOrElse("")
+    ([], details)
+}
+
+@Callable(i)
+func getTokenInfo(assetId: String) = {
+    let mapping = getString(keyTokenMapping(assetId)).valueOrElse("")
+    let isWrapped = getBoolean(keyIsWrapped(assetId)).valueOrElse(false)
+    let isPaused = isTokenPaused(assetId)
+    let dailyLimit = getDailyLimit(assetId)
+    let dailyTransferred = getDailyTransferred(assetId)
+
+    let info = mapping + SEPARATOR + isWrapped.toString() + SEPARATOR + isPaused.toString() + SEPARATOR + dailyLimit.toString() + SEPARATOR + dailyTransferred.toString()
+    ([], info)
+}
+
+# ============ Verification Entry Point ============
+
+@Verifier(tx)
+func verify() = {
+    # Allow all transactions if signed by the owner
+    let owner = getString(keyOwner()).valueOrElse("")
+    if owner == "" then sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+    else {
+        let ownerAddress = addressFromStringValue(owner)
+        tx.sender == ownerAddress || sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+    }
+}
