@@ -43,6 +43,7 @@ export interface SignedAttestation {
   transferId: string;
   signature: string;
   validatorAddress: string;
+  publicKey?: string; // Full public key (compressed or uncompressed) for WAVES verification
   messageHash: string;
   timestamp: number;
   sourceChain: ChainType;
@@ -73,6 +74,7 @@ export interface ValidatorConfig {
   // Validator credentials
   validatorPrivateKey: string;
   validatorAddress: string;
+  wavesSeed?: string; // WAVES seed phrase for relaying to WAVES
 
   // P2P configuration
   p2pPort: number;

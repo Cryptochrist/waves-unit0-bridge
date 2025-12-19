@@ -1,13 +1,13 @@
 import { ethers } from 'ethers';
 import winston from 'winston';
-import { loadConfig } from './config';
-import { ValidatorConfig, TransferEvent, SignedAttestation, ChainType } from './types';
-import { WavesWatcher } from './watchers/WavesWatcher';
-import { Unit0Watcher } from './watchers/Unit0Watcher';
-import { SignatureEngine, SignatureBatcher } from './services/SignatureEngine';
-import { P2PNetwork } from './p2p/P2PNetwork';
-import { Relayer } from './services/Relayer';
-import { Database, TransferRecord } from './services/Database';
+import { loadConfig } from './config/index.js';
+import { ValidatorConfig, TransferEvent, SignedAttestation, ChainType } from './types/index.js';
+import { WavesWatcher } from './watchers/WavesWatcher.js';
+import { Unit0Watcher } from './watchers/Unit0Watcher.js';
+import { SignatureEngine, SignatureBatcher } from './services/SignatureEngine.js';
+import { P2PNetwork } from './p2p/P2PNetwork.js';
+import { Relayer } from './services/Relayer.js';
+import { Database, TransferRecord } from './services/Database.js';
 
 /**
  * Main Validator Node class
@@ -37,6 +37,9 @@ export class ValidatorNode {
   private readonly PROCESS_INTERVAL_MS = 5000;
   private readonly HEARTBEAT_INTERVAL_MS = 30000;
 
+  // On fresh start (no saved height), look back this many blocks to catch recent transactions
+  private readonly STARTUP_LOOKBACK_BLOCKS = 20;
+
   constructor(config: ValidatorConfig) {
     this.config = config;
 
@@ -61,8 +64,8 @@ export class ValidatorNode {
       ],
     });
 
-    // Initialize signature engine
-    this.signatureEngine = new SignatureEngine(config.validatorPrivateKey, this.logger);
+    // Initialize signature engine (pass wavesSeed for WAVES-bound signatures)
+    this.signatureEngine = new SignatureEngine(config.validatorPrivateKey, this.logger, config.unit0ChainId, config.wavesSeed);
     this.signatureBatcher = new SignatureBatcher(this.signatureEngine, this.logger);
 
     // Initialize database
@@ -104,8 +107,31 @@ export class ValidatorNode {
       await this.database.open();
 
       // Get last processed heights
-      const wavesHeight = await this.database.getWavesBlockHeight();
-      const unit0Height = await this.database.getUnit0BlockHeight();
+      let wavesHeight = await this.database.getWavesBlockHeight();
+      let unit0Height = await this.database.getUnit0BlockHeight();
+
+      // Check for command-line override via environment variables
+      const wavesOverride = process.env.WAVES_START_BLOCK ? parseInt(process.env.WAVES_START_BLOCK) : null;
+      const unit0Override = process.env.UNIT0_START_BLOCK ? parseInt(process.env.UNIT0_START_BLOCK) : null;
+
+      if (wavesOverride !== null && !isNaN(wavesOverride)) {
+        wavesHeight = wavesOverride;
+        this.logger.info(`Using CLI override for WAVES start block: ${wavesHeight}`);
+      } else if (wavesHeight === null) {
+        // If no saved height, look back to catch recent transactions
+        const currentWavesHeight = await this.wavesWatcher.getCurrentHeight();
+        wavesHeight = currentWavesHeight - this.config.wavesConfirmations - this.STARTUP_LOOKBACK_BLOCKS;
+        this.logger.info(`No saved WAVES height, scanning back ${this.STARTUP_LOOKBACK_BLOCKS} blocks from current`);
+      }
+
+      if (unit0Override !== null && !isNaN(unit0Override)) {
+        unit0Height = unit0Override;
+        this.logger.info(`Using CLI override for Unit0 start block: ${unit0Height}`);
+      } else if (unit0Height === null) {
+        const currentUnit0Height = await this.unit0Watcher.getCurrentBlock();
+        unit0Height = currentUnit0Height - this.config.unit0Confirmations - this.STARTUP_LOOKBACK_BLOCKS;
+        this.logger.info(`No saved Unit0 height, scanning back ${this.STARTUP_LOOKBACK_BLOCKS} blocks from current`);
+      }
 
       // Set up event handlers
       this.setupEventHandlers();
@@ -113,9 +139,9 @@ export class ValidatorNode {
       // Start P2P network
       await this.p2pNetwork.start();
 
-      // Start watchers
-      await this.wavesWatcher.start(wavesHeight || undefined);
-      await this.unit0Watcher.start(unit0Height || undefined);
+      // Start watchers with determined heights
+      await this.wavesWatcher.start(wavesHeight);
+      await this.unit0Watcher.start(unit0Height);
 
       this.isRunning = true;
 
@@ -230,10 +256,28 @@ export class ValidatorNode {
       await this.database.saveTransfer(transfer);
 
       // Sign attestation
-      const attestation =
-        transfer.destinationChain === ChainType.UNIT0
-          ? await this.signatureEngine.signTransferForUnit0(transfer)
-          : await this.signatureEngine.signTransferForWaves(transfer);
+      let attestation;
+      if (transfer.destinationChain === ChainType.UNIT0) {
+        // For transfers TO Unit0, we need to resolve the Unit0 token address
+        const unit0TokenAddress = await this.relayer.getUnit0TokenAddress(transfer.token);
+        if (unit0TokenAddress === '0x0000000000000000000000000000000000000000') {
+          this.logger.error(`No Unit0 token registered for WAVES asset: ${transfer.token}`);
+          await this.database.updateTransferStatus(transfer.transferId, 'failed');
+          return;
+        }
+        this.logger.debug(`Resolved WAVES asset ${transfer.token} to Unit0 token ${unit0TokenAddress}`);
+        attestation = await this.signatureEngine.signTransferForUnit0(transfer, unit0TokenAddress);
+      } else {
+        // For transfers TO WAVES, we need to resolve the WAVES asset ID
+        const wavesAssetId = await this.relayer.getWavesAssetId(transfer.token);
+        if (!wavesAssetId) {
+          this.logger.error(`No WAVES asset mapping for Unit0 token: ${transfer.token}`);
+          await this.database.updateTransferStatus(transfer.transferId, 'failed');
+          return;
+        }
+        this.logger.debug(`Resolved Unit0 token ${transfer.token} to WAVES asset ${wavesAssetId}`);
+        attestation = await this.signatureEngine.signTransferForWaves(transfer, wavesAssetId);
+      }
 
       // Save our attestation
       await this.database.saveAttestation(attestation);
@@ -333,7 +377,25 @@ export class ValidatorNode {
       if (transfer.destinationChain === ChainType.UNIT0) {
         txHash = await this.relayer.relayToUnit0(transfer, signatures);
       } else {
-        const publicKeys = record.attestations.map((a) => a.validatorAddress);
+        // For WAVES, use the actual public keys (not addresses) for signature verification
+        let publicKeys = record.attestations
+          .map((a) => a.publicKey)
+          .filter((pk): pk is string => pk !== undefined);
+
+        // Fallback: if no public keys in attestations (old format), use our own WAVES public key
+        // This requires re-signing with the correct key
+        if (publicKeys.length === 0) {
+          this.logger.warn('No public keys in attestations, re-signing transfer for WAVES');
+          const wavesAssetId = await this.relayer.getWavesAssetId(transfer.token);
+          if (wavesAssetId) {
+            const newAttestation = await this.signatureEngine.signTransferForWaves(transfer, wavesAssetId);
+            signatures = [newAttestation.signature];
+            publicKeys = [newAttestation.publicKey!];
+            // Save the new attestation
+            await this.database.saveAttestation(newAttestation);
+          }
+        }
+
         txHash = await this.relayer.relayToWaves(transfer, signatures, publicKeys);
       }
 
@@ -411,5 +473,10 @@ async function main() {
   }
 }
 
-// Run if executed directly
-main().catch(console.error);
+// Run if executed directly (not when imported as a module)
+// Check if this file is the main entry point
+import { fileURLToPath } from 'url';
+const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
+if (isMainModule) {
+  main().catch(console.error);
+}

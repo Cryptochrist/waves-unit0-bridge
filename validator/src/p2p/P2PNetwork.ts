@@ -8,7 +8,7 @@ import { identify } from '@libp2p/identify';
 import { bootstrap } from '@libp2p/bootstrap';
 import { kadDHT } from '@libp2p/kad-dht';
 import { multiaddr } from '@multiformats/multiaddr';
-import { SignedAttestation, TransferEvent, ValidatorConfig } from '../types';
+import { SignedAttestation, TransferEvent, ValidatorConfig } from '../types/index.js';
 import { Logger } from 'winston';
 
 // Message types for P2P communication
@@ -173,7 +173,14 @@ export class P2PNetwork extends EventEmitter {
    */
   private handlePubsubMessage(topic: string, data: Uint8Array): void {
     try {
-      const message: P2PMessage = JSON.parse(new TextDecoder().decode(data));
+      // Use custom deserializer to handle BigInt values
+      const message: P2PMessage = JSON.parse(
+        new TextDecoder().decode(data),
+        (key, value) =>
+          value && typeof value === 'object' && '__bigint__' in value
+            ? BigInt(value.__bigint__)
+            : value
+      );
 
       // Ignore our own messages
       if (message.sender === this.validatorAddress) {
@@ -315,7 +322,11 @@ export class P2PNetwork extends EventEmitter {
     }
 
     const pubsub = this.node.services.pubsub as GossipSub;
-    const data = new TextEncoder().encode(JSON.stringify(message));
+    // Use custom serializer to handle BigInt values
+    const jsonStr = JSON.stringify(message, (key, value) =>
+      typeof value === 'bigint' ? { __bigint__: value.toString() } : value
+    );
+    const data = new TextEncoder().encode(jsonStr);
     await pubsub.publish(topic, data);
   }
 

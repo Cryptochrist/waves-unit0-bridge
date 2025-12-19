@@ -14,12 +14,20 @@
     "deploy:localhost": "hardhat run scripts/deploy.js --network localhost",
     "deploy:unit0": "hardhat run scripts/deploy.js --network unit0",
     "deploy:unit0-testnet": "hardhat run scripts/deploy.js --network unit0Testnet",
+    "deploy:interactive": "hardhat run scripts/deploy-interactive.js --network unit0",
     "deploy:token": "hardhat run scripts/deploy-units-compatible-token.js",
     "add-validators": "hardhat run scripts/add-validators.js",
+    "add-validators:interactive": "hardhat run scripts/add-validators-interactive.js --network unit0",
     "register-token": "hardhat run scripts/register-token.js",
     "node": "hardhat node"
   },
-  "keywords": ["bridge", "waves", "unit0", "cross-chain", "defi"],
+  "keywords": [
+    "bridge",
+    "waves",
+    "unit0",
+    "cross-chain",
+    "defi"
+  ],
   "author": "",
   "license": "MIT",
   "type": "commonjs",
@@ -47,5 +55,8 @@
     "ts-node": "^10.9.2",
     "typechain": "^8.3.2",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@waves/waves-transactions": "^4.3.11"
   }
 }

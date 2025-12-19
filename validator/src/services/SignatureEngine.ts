@@ -1,7 +1,8 @@
-import { ethers, Wallet, Signer } from 'ethers';
-import { TransferEvent, SignedAttestation, ChainType, TokenType } from '../types';
+import { ethers, Wallet, Signer, SigningKey } from 'ethers';
+import { TransferEvent, SignedAttestation, ChainType, TokenType } from '../types/index.js';
 import { Logger } from 'winston';
 import * as crypto from 'crypto';
+import { publicKey as wavesPublicKey, signBytes } from '@waves/ts-lib-crypto';
 
 /**
  * Signature engine for signing cross-chain transfer attestations
@@ -12,20 +13,37 @@ import * as crypto from 'crypto';
 export class SignatureEngine {
   private wallet: Wallet;
   private logger: Logger;
+  private chainId: bigint;
+  private wavesSeed?: string;
+  private wavesPublicKeyStr?: string;
 
-  constructor(privateKey: string, logger: Logger) {
+  constructor(privateKey: string, logger: Logger, chainId: number = 88811, wavesSeed?: string) {
     this.wallet = new ethers.Wallet(privateKey);
     this.logger = logger;
+    this.chainId = BigInt(chainId);
+
+    // Store WAVES seed for WAVES-bound signing
+    if (wavesSeed) {
+      this.wavesSeed = wavesSeed;
+      this.wavesPublicKeyStr = wavesPublicKey(wavesSeed);
+      this.logger.info(`WAVES signing enabled with public key: ${this.wavesPublicKeyStr}`);
+    }
 
     this.logger.info(`Signature engine initialized for validator: ${this.wallet.address}`);
   }
 
   /**
    * Sign a transfer attestation for Unit0 (EVM signature)
+   * @param transfer The transfer event
+   * @param unit0TokenAddress The Unit0 token address (resolved from WAVES asset ID)
    */
-  async signTransferForUnit0(transfer: TransferEvent): Promise<SignedAttestation> {
+  async signTransferForUnit0(transfer: TransferEvent, unit0TokenAddress?: string): Promise<SignedAttestation> {
+    // Use provided token address or fall back to transfer.token
+    // (transfer.token might be a WAVES asset ID that needs to be resolved first)
+    const tokenAddress = unit0TokenAddress || transfer.token;
+
     // Create the message hash that matches the smart contract's expected format
-    const messageHash = this.createUnit0MessageHash(transfer);
+    const messageHash = this.createUnit0MessageHash(transfer, tokenAddress);
 
     // Sign with EIP-191 prefix
     const signature = await this.wallet.signMessage(ethers.getBytes(messageHash));
@@ -46,27 +64,47 @@ export class SignatureEngine {
   }
 
   /**
-   * Sign a transfer attestation for WAVES (Ed25519 compatible)
+   * Sign a transfer attestation for WAVES
+   * Uses WAVES native ed25519 signing (via waves-transactions library)
+   * This matches what WAVES sigVerify expects
    */
-  async signTransferForWaves(transfer: TransferEvent): Promise<SignedAttestation> {
-    // Create the message that matches WAVES contract expected format
-    const message = this.createWavesMessage(transfer);
-    const messageHash = ethers.keccak256(message);
+  async signTransferForWaves(transfer: TransferEvent, wavesAssetId: string): Promise<SignedAttestation> {
+    if (!this.wavesSeed || !this.wavesPublicKeyStr) {
+      throw new Error('WAVES seed not configured - cannot sign for WAVES');
+    }
 
-    // Sign with ECDSA (will need to be verified differently on WAVES)
-    const signature = await this.wallet.signMessage(ethers.getBytes(messageHash));
+    // Create the message that matches WAVES contract expected format exactly
+    // WAVES contract: let messageData = transferId + recipient + assetId + amount.toString() + UNIT0_CHAIN_ID.toString()
+    // WAVES contract: let messageHash = sha256(messageData.toBytes())
+    const UNIT0_CHAIN_ID = 88811;
+    const messageData = transfer.transferId + transfer.recipient + wavesAssetId + transfer.amount.toString() + UNIT0_CHAIN_ID.toString();
+
+    // Convert string to bytes
+    const messageBytes = new TextEncoder().encode(messageData);
+
+    // IMPORTANT: WAVES contract uses sha256(messageData.toBytes()) before sigVerify
+    // So we must sign the SHA256 hash, not the raw message
+    const messageHash = crypto.createHash('sha256').update(messageBytes).digest();
+
+    // Sign the hash using WAVES native signing (ed25519 curve25519)
+    // signBytes from @waves/ts-lib-crypto returns base58 string by default
+    const signatureBase58 = signBytes(this.wavesSeed, messageHash);
+
+    // Keep signature as base58 - the Relayer will convert to base64 for WAVES tx
+    const signature = signatureBase58;
 
     const attestation: SignedAttestation = {
       transferId: transfer.transferId,
-      signature,
+      signature: signature,
       validatorAddress: this.wallet.address,
-      messageHash,
+      publicKey: this.wavesPublicKeyStr, // WAVES public key (base58)
+      messageHash: '0x' + messageHash.toString('hex'), // For reference
       timestamp: Date.now(),
       sourceChain: transfer.sourceChain,
       destinationChain: transfer.destinationChain,
     };
 
-    this.logger.debug(`Signed attestation for WAVES: ${transfer.transferId}`);
+    this.logger.debug(`Signed attestation for WAVES: ${transfer.transferId} with public key ${this.wavesPublicKeyStr}`);
 
     return attestation;
   }
@@ -74,18 +112,26 @@ export class SignatureEngine {
   /**
    * Create message hash for Unit0 verification
    * This must match the format expected by the smart contract
+   * @param transfer The transfer event
+   * @param tokenAddress The Unit0 token address (EVM address)
    */
-  private createUnit0MessageHash(transfer: TransferEvent): string {
-    // Encode the transfer data in the same format as the smart contract
-    const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'address', 'uint256', 'address', 'uint8', 'uint256'],
+  private createUnit0MessageHash(transfer: TransferEvent, tokenAddress: string): string {
+    // Convert WAVES transaction ID (base58 string) to bytes32
+    // We hash the string to get a deterministic bytes32 value
+    const transferIdBytes32 = ethers.keccak256(ethers.toUtf8Bytes(transfer.transferId));
+
+    // Encode using solidityPacked to match abi.encodePacked in the contract
+    // Contract uses: keccak256(abi.encodePacked(wavesTransferId, token, amount, recipient, tokenType, tokenId, block.chainid))
+    const encoded = ethers.solidityPacked(
+      ['bytes32', 'address', 'uint256', 'address', 'uint8', 'uint256', 'uint256'],
       [
-        transfer.transferId,
-        transfer.token,
+        transferIdBytes32,
+        tokenAddress,
         transfer.amount,
         transfer.recipient,
         this.tokenTypeToNumber(transfer.tokenType),
         transfer.tokenId || 0,
+        this.chainId,
       ]
     );
 
@@ -198,6 +244,22 @@ export class SignatureEngine {
    */
   getValidatorAddress(): string {
     return this.wallet.address;
+  }
+
+  /**
+   * Get the uncompressed public key (65 bytes: 0x04 + x + y)
+   */
+  getPublicKeyUncompressed(): string {
+    const signingKey = this.wallet.signingKey;
+    return signingKey.publicKey; // Returns 0x04... (65 bytes)
+  }
+
+  /**
+   * Get the compressed public key (33 bytes: 0x02/0x03 + x)
+   */
+  getPublicKeyCompressed(): string {
+    const signingKey = this.wallet.signingKey;
+    return signingKey.compressedPublicKey; // Returns 0x02/0x03... (33 bytes)
   }
 
   /**

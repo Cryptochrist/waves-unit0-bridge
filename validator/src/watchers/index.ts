@@ -1,2 +1,2 @@
-export { WavesWatcher } from './WavesWatcher';
-export { Unit0Watcher } from './Unit0Watcher';
+export { WavesWatcher } from './WavesWatcher.js';
+export { Unit0Watcher } from './Unit0Watcher.js';

@@ -45,4 +45,11 @@ interface IWrappedToken is IERC20 {
      * @notice Get the bridge address
      */
     function bridge() external view returns (address);
+
+    /**
+     * @notice Set token metadata (for fixing tokens with missing name/symbol)
+     * @param name Token name
+     * @param symbol Token symbol
+     */
+    function setTokenMetadata(string memory name, string memory symbol) external;
 }

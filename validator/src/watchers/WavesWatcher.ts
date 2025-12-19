@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
-import { TransferEvent, ChainType, TokenType, ValidatorConfig } from '../types';
-import { createLogger, Logger } from 'winston';
+import { TransferEvent, ChainType, TokenType, ValidatorConfig } from '../types/index.js';
+import { Logger } from 'winston';
 
 interface WavesTransaction {
   id: string;
@@ -9,6 +9,7 @@ interface WavesTransaction {
   senderPublicKey: string;
   timestamp: number;
   height: number;
+  dApp?: string;  // Address of the dApp being called
   call?: {
     function: string;
     args: Array<{ type: string; value: string | number }>;
@@ -37,6 +38,9 @@ export class WavesWatcher extends EventEmitter {
   private isRunning: boolean = false;
   private pollInterval: NodeJS.Timeout | null = null;
   private readonly POLL_INTERVAL_MS = 3000; // 3 seconds
+  private readonly BLOCK_DELAY_MS = 1500; // Delay between block fetches to avoid rate limiting
+  private readonly MAX_RETRIES = 5;
+  private readonly RETRY_DELAY_MS = 3000;
 
   constructor(config: ValidatorConfig, logger: Logger) {
     super();
@@ -81,15 +85,38 @@ export class WavesWatcher extends EventEmitter {
   }
 
   /**
-   * Get current blockchain height
+   * Get current blockchain height with retry logic
    */
   async getCurrentHeight(): Promise<number> {
-    const response = await fetch(`${this.config.wavesNodeUrl}/blocks/height`);
-    if (!response.ok) {
-      throw new Error(`Failed to get WAVES height: ${response.statusText}`);
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
+      try {
+        const response = await fetch(`${this.config.wavesNodeUrl}/blocks/height`);
+
+        if (response.status === 429) {
+          const waitTime = this.RETRY_DELAY_MS * attempt;
+          this.logger.warn(`Rate limited fetching height, waiting ${waitTime}ms (attempt ${attempt}/${this.MAX_RETRIES})`);
+          await this.sleep(waitTime);
+          continue;
+        }
+
+        if (!response.ok) {
+          throw new Error(`Failed to get WAVES height: ${response.statusText}`);
+        }
+
+        const data = await response.json() as { height: number };
+        return data.height;
+      } catch (error) {
+        lastError = error as Error;
+        if (attempt < this.MAX_RETRIES) {
+          const waitTime = this.RETRY_DELAY_MS * attempt;
+          await this.sleep(waitTime);
+        }
+      }
     }
-    const data = await response.json() as { height: number };
-    return data.height;
+
+    throw lastError || new Error(`Failed to get WAVES height after ${this.MAX_RETRIES} retries`);
   }
 
   /**
@@ -102,11 +129,16 @@ export class WavesWatcher extends EventEmitter {
       const currentHeight = await this.getCurrentHeight();
       const confirmedHeight = currentHeight - this.config.wavesConfirmations;
 
-      // Process new confirmed blocks
+      // Process new confirmed blocks with rate limiting
       while (this.lastProcessedHeight < confirmedHeight) {
         const targetHeight = this.lastProcessedHeight + 1;
         await this.processBlock(targetHeight);
         this.lastProcessedHeight = targetHeight;
+
+        // Add delay between blocks to avoid rate limiting
+        if (this.lastProcessedHeight < confirmedHeight) {
+          await this.sleep(this.BLOCK_DELAY_MS);
+        }
       }
     } catch (error) {
       this.logger.error('Error polling WAVES blockchain:', error);
@@ -126,11 +158,20 @@ export class WavesWatcher extends EventEmitter {
     try {
       const block = await this.getBlock(height);
 
+      let bridgeTxCount = 0;
       for (const tx of block.transactions) {
         // Only process invoke script transactions to the bridge
         if (tx.type === 16 && this.isBridgeTransaction(tx)) {
+          this.logger.debug(`Found bridge transaction ${tx.id} in block ${height}`);
           await this.processTransaction(tx, height);
+          bridgeTxCount++;
         }
+      }
+
+      if (bridgeTxCount > 0) {
+        this.logger.info(`Processed ${bridgeTxCount} bridge transaction(s) in block ${height}`);
+      } else {
+        this.logger.debug(`Processed block ${height} (no bridge txs)`);
       }
 
       this.emit('block', { height, timestamp: block.timestamp });
@@ -141,23 +182,54 @@ export class WavesWatcher extends EventEmitter {
   }
 
   /**
-   * Get block by height
+   * Get block by height with retry logic
    */
   private async getBlock(height: number): Promise<WavesBlock> {
-    const response = await fetch(`${this.config.wavesNodeUrl}/blocks/at/${height}`);
-    if (!response.ok) {
-      throw new Error(`Failed to get WAVES block ${height}: ${response.statusText}`);
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
+      try {
+        const response = await fetch(`${this.config.wavesNodeUrl}/blocks/at/${height}`);
+
+        if (response.status === 429) {
+          // Rate limited - wait and retry
+          const waitTime = this.RETRY_DELAY_MS * attempt;
+          this.logger.warn(`Rate limited fetching block ${height}, waiting ${waitTime}ms (attempt ${attempt}/${this.MAX_RETRIES})`);
+          await this.sleep(waitTime);
+          continue;
+        }
+
+        if (!response.ok) {
+          throw new Error(`Failed to get WAVES block ${height}: ${response.statusText}`);
+        }
+
+        return response.json() as Promise<WavesBlock>;
+      } catch (error) {
+        lastError = error as Error;
+        if (attempt < this.MAX_RETRIES) {
+          const waitTime = this.RETRY_DELAY_MS * attempt;
+          this.logger.warn(`Error fetching block ${height}, retrying in ${waitTime}ms (attempt ${attempt}/${this.MAX_RETRIES})`);
+          await this.sleep(waitTime);
+        }
+      }
     }
-    return response.json() as Promise<WavesBlock>;
+
+    throw lastError || new Error(`Failed to get WAVES block ${height} after ${this.MAX_RETRIES} retries`);
+  }
+
+  /**
+   * Sleep helper
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
    * Check if transaction is to the bridge contract
    */
   private isBridgeTransaction(tx: WavesTransaction): boolean {
-    // Check if it's an invoke to the bridge dApp
-    // The dApp address would be in the transaction
-    return tx.stateChanges !== undefined;
+    // Check if it's an invoke to the bridge dApp address
+    return tx.dApp === this.config.wavesBridgeAddress;
   }
 
   /**

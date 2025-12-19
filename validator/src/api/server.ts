@@ -1,8 +1,8 @@
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
 import { Logger } from 'winston';
-import { ValidatorConfig } from '../types';
-import { Database } from '../services/Database';
+import { ValidatorConfig } from '../types/index.js';
+import { Database } from '../services/Database.js';
 
 /**
  * REST API server for validator monitoring and status

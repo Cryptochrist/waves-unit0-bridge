@@ -262,7 +262,7 @@ contract WavesUnit0Bridge is ReentrancyGuard, Pausable, Ownable {
     }
 
     /**
-     * @notice Create and register a wrapped token for a WAVES asset
+     * @notice Create and register a wrapped token for a WAVES asset (owner only)
      * @param wavesAssetId WAVES asset ID
      * @param name Token name
      * @param symbol Token symbol
@@ -276,6 +276,37 @@ contract WavesUnit0Bridge is ReentrancyGuard, Pausable, Ownable {
         uint8 wavesDecimals,
         uint8 unit0Decimals
     ) external onlyOwner returns (address wrappedToken) {
+        return _createWrappedToken(wavesAssetId, name, symbol, wavesDecimals, unit0Decimals);
+    }
+
+    /**
+     * @notice Permissionless token registration - anyone can register a WAVES token
+     * @param wavesAssetId WAVES asset ID
+     * @param name Token name
+     * @param symbol Token symbol
+     * @param wavesDecimals Decimals on WAVES
+     * @param unit0Decimals Decimals for Unit0 wrapped token
+     */
+    function registerToken(
+        string calldata wavesAssetId,
+        string calldata name,
+        string calldata symbol,
+        uint8 wavesDecimals,
+        uint8 unit0Decimals
+    ) external returns (address wrappedToken) {
+        return _createWrappedToken(wavesAssetId, name, symbol, wavesDecimals, unit0Decimals);
+    }
+
+    /**
+     * @notice Internal function to create wrapped token
+     */
+    function _createWrappedToken(
+        string calldata wavesAssetId,
+        string calldata name,
+        string calldata symbol,
+        uint8 wavesDecimals,
+        uint8 unit0Decimals
+    ) internal returns (address wrappedToken) {
         require(wavesToUnit0Token[wavesAssetId] == address(0), "Already registered");
 
         // Create wrapped token via factory
@@ -318,6 +349,21 @@ contract WavesUnit0Bridge is ReentrancyGuard, Pausable, Ownable {
     function setTokenPaused(address token, bool paused) external onlyOwner {
         tokenPaused[token] = paused;
         emit TokenPausedEvent(token, paused);
+    }
+
+    /**
+     * @notice Update wrapped token metadata (for fixing tokens with missing name/symbol)
+     * @param token Wrapped token address
+     * @param name_ New token name
+     * @param symbol_ New token symbol
+     */
+    function setWrappedTokenMetadata(
+        address token,
+        string calldata name_,
+        string calldata symbol_
+    ) external onlyOwner {
+        require(tokenRegistry[token].isWrapped, "Not a wrapped token");
+        IWrappedToken(token).setTokenMetadata(name_, symbol_);
     }
 
     // ============ Lock Functions (Unit0 -> WAVES) ============

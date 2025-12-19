@@ -1,6 +1,10 @@
-import { ValidatorConfig } from '../types';
+import { ValidatorConfig } from '../types/index.js';
 import dotenv from 'dotenv';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
@@ -24,6 +28,7 @@ export function loadConfig(): ValidatorConfig {
     // Validator credentials
     validatorPrivateKey: process.env.VALIDATOR_PRIVATE_KEY || '',
     validatorAddress: process.env.VALIDATOR_ADDRESS || '',
+    wavesSeed: process.env.WAVES_SEED || undefined,
 
     // P2P configuration
     p2pPort: parseInt(process.env.P2P_PORT || '9000'),

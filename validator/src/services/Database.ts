@@ -1,7 +1,27 @@
 import { Level } from 'level';
-import { TransferEvent, SignedAttestation, TransferStatus } from '../types';
+import { TransferEvent, SignedAttestation, TransferStatus } from '../types/index.js';
 import { Logger } from 'winston';
 import path from 'path';
+
+/**
+ * Custom JSON serializer that handles BigInt
+ */
+function serialize(obj: unknown): string {
+  return JSON.stringify(obj, (key, value) =>
+    typeof value === 'bigint' ? { __bigint__: value.toString() } : value
+  );
+}
+
+/**
+ * Custom JSON deserializer that handles BigInt
+ */
+function deserialize<T>(json: string): T {
+  return JSON.parse(json, (key, value) =>
+    value && typeof value === 'object' && '__bigint__' in value
+      ? BigInt(value.__bigint__)
+      : value
+  ) as T;
+}
 
 /**
  * Database keys structure:
@@ -86,7 +106,7 @@ export class Database {
       updatedAt: Date.now(),
     };
 
-    await this.db.put(key, JSON.stringify(record));
+    await this.db.put(key, serialize(record));
     this.logger.debug(`Saved transfer ${transfer.transferId}`);
   }
 
@@ -97,7 +117,7 @@ export class Database {
     try {
       const key = `transfer:${transferId}`;
       const data = await this.db.get(key);
-      return JSON.parse(data);
+      return deserialize<TransferRecord>(data);
     } catch (error: any) {
       if (error.code === 'LEVEL_NOT_FOUND') {
         return null;
@@ -125,7 +145,7 @@ export class Database {
       record.relayTxHash = relayTxHash;
     }
 
-    await this.db.put(`transfer:${transferId}`, JSON.stringify(record));
+    await this.db.put(`transfer:${transferId}`, serialize(record));
     this.logger.debug(`Updated transfer ${transferId} status to ${status}`);
   }
 
@@ -139,7 +159,7 @@ export class Database {
       gte: 'transfer:',
       lte: 'transfer:\xFF',
     })) {
-      const record: TransferRecord = JSON.parse(value);
+      const record = deserialize<TransferRecord>(value);
       if (record.status === 'pending' || record.status === 'attesting') {
         transfers.push(record);
       }
@@ -158,7 +178,7 @@ export class Database {
       gte: 'transfer:',
       lte: 'transfer:\xFF',
     })) {
-      const record: TransferRecord = JSON.parse(value);
+      const record = deserialize<TransferRecord>(value);
       if (record.status === status) {
         transfers.push(record);
       }
@@ -175,7 +195,7 @@ export class Database {
   async saveAttestation(attestation: SignedAttestation): Promise<void> {
     const key = `attestation:${attestation.transferId}:${attestation.validatorAddress}`;
 
-    await this.db.put(key, JSON.stringify(attestation));
+    await this.db.put(key, serialize(attestation));
 
     // Also add to transfer record
     const record = await this.getTransfer(attestation.transferId);
@@ -189,7 +209,7 @@ export class Database {
         record.attestations.push(attestation);
       }
       record.updatedAt = Date.now();
-      await this.db.put(`transfer:${attestation.transferId}`, JSON.stringify(record));
+      await this.db.put(`transfer:${attestation.transferId}`, serialize(record));
     }
 
     this.logger.debug(
@@ -207,7 +227,7 @@ export class Database {
       gte: `attestation:${transferId}:`,
       lte: `attestation:${transferId}:\xFF`,
     })) {
-      attestations.push(JSON.parse(value));
+      attestations.push(deserialize<SignedAttestation>(value));
     }
 
     return attestations;
@@ -282,7 +302,7 @@ export class Database {
    */
   async saveValidator(validator: ValidatorRecord): Promise<void> {
     const key = `validator:${validator.address}`;
-    await this.db.put(key, JSON.stringify(validator));
+    await this.db.put(key, serialize(validator));
   }
 
   /**
@@ -292,7 +312,7 @@ export class Database {
     try {
       const key = `validator:${address}`;
       const data = await this.db.get(key);
-      return JSON.parse(data);
+      return deserialize<ValidatorRecord>(data);
     } catch (error: any) {
       if (error.code === 'LEVEL_NOT_FOUND') {
         return null;
@@ -311,7 +331,7 @@ export class Database {
       gte: 'validator:',
       lte: 'validator:\xFF',
     })) {
-      validators.push(JSON.parse(value));
+      validators.push(deserialize<ValidatorRecord>(value));
     }
 
     return validators;
@@ -338,7 +358,7 @@ export class Database {
       lte: 'transfer:\xFF',
     })) {
       total++;
-      const record: TransferRecord = JSON.parse(value);
+      const record = deserialize<TransferRecord>(value);
       switch (record.status) {
         case 'pending':
         case 'attesting':

@@ -1,15 +1,14 @@
 import { EventEmitter } from 'events';
 import { ethers, Contract, Provider, Log, EventLog } from 'ethers';
-import { TransferEvent, ChainType, TokenType, ValidatorConfig } from '../types';
+import { TransferEvent, ChainType, TokenType, ValidatorConfig } from '../types/index.js';
 import { Logger } from 'winston';
 
 // Bridge contract ABI (only the events we need)
+// Must match WavesUnit0Bridge.sol event signatures exactly
 const BRIDGE_ABI = [
-  'event TokensLocked(bytes32 indexed transferId, address indexed token, address indexed sender, string recipient, uint256 amount, uint8 tokenType, uint256 tokenId)',
-  'event TokensReleased(bytes32 indexed transferId, address indexed token, address indexed recipient, uint256 amount)',
-  'event NFTLocked(bytes32 indexed transferId, address indexed token, address indexed sender, string recipient, uint256 tokenId)',
-  'event NFTReleased(bytes32 indexed transferId, address indexed token, address indexed recipient, uint256 tokenId)',
-  'function getTransferStatus(bytes32 transferId) view returns (uint8)',
+  'event TokensLocked(bytes32 indexed lockId, address indexed token, uint256 amount, address indexed sender, string wavesDestination, uint256 nonce, uint8 tokenType, uint256 tokenId)',
+  'event TokensReleased(bytes32 indexed wavesTransferId, address indexed token, uint256 amount, address indexed recipient, uint8 tokenType, uint256 tokenId)',
+  'function processedTransfers(bytes32) view returns (bool)',
 ];
 
 /**
@@ -124,26 +123,14 @@ export class Unit0Watcher extends EventEmitter {
         toBlock
       );
 
-      // Query NFTLocked events
-      const nftLockedFilter = this.bridgeContract.filters.NFTLocked();
-      const nftLockedEvents = await this.bridgeContract.queryFilter(
-        nftLockedFilter,
-        fromBlock,
-        toBlock
-      );
-
       // Process all events
       for (const event of tokensLockedEvents) {
         await this.handleTokensLocked(event as EventLog);
       }
 
-      for (const event of nftLockedEvents) {
-        await this.handleNFTLocked(event as EventLog);
-      }
-
-      if (tokensLockedEvents.length > 0 || nftLockedEvents.length > 0) {
-        this.logger.debug(
-          `Processed blocks ${fromBlock}-${toBlock}: ${tokensLockedEvents.length} token locks, ${nftLockedEvents.length} NFT locks`
+      if (tokensLockedEvents.length > 0) {
+        this.logger.info(
+          `Processed blocks ${fromBlock}-${toBlock}: ${tokensLockedEvents.length} token locks`
         );
       }
 
@@ -156,11 +143,13 @@ export class Unit0Watcher extends EventEmitter {
 
   /**
    * Handle TokensLocked event
+   * Event signature: TokensLocked(bytes32 indexed lockId, address indexed token, uint256 amount, address indexed sender, string wavesDestination, uint256 nonce, uint8 tokenType, uint256 tokenId)
    */
   private async handleTokensLocked(event: EventLog): Promise<void> {
     try {
       const block = await event.getBlock();
-      const [transferId, token, sender, recipient, amount, tokenType, tokenId] = event.args || [];
+      // Args order matches event: lockId, token, amount, sender, wavesDestination, nonce, tokenType, tokenId
+      const [lockId, token, amount, sender, wavesDestination, nonce, tokenType, tokenId] = event.args || [];
 
       // Map tokenType number to our enum
       let mappedTokenType: TokenType;
@@ -179,13 +168,13 @@ export class Unit0Watcher extends EventEmitter {
       }
 
       const transferEvent: TransferEvent = {
-        transferId: transferId,
+        transferId: lockId, // Use the lockId as the transfer ID
         sourceChain: ChainType.UNIT0,
         destinationChain: ChainType.WAVES,
         token: token,
         amount: BigInt(amount),
         sender: sender,
-        recipient: recipient,
+        recipient: wavesDestination, // WAVES address string
         tokenType: mappedTokenType,
         tokenId: tokenId ? BigInt(tokenId) : undefined,
         sourceBlockNumber: event.blockNumber,
@@ -199,6 +188,7 @@ export class Unit0Watcher extends EventEmitter {
         token: transferEvent.token,
         amount: transferEvent.amount.toString(),
         recipient: transferEvent.recipient,
+        nonce: nonce.toString(),
       });
 
       this.emit('transfer', transferEvent);
@@ -208,43 +198,10 @@ export class Unit0Watcher extends EventEmitter {
   }
 
   /**
-   * Handle NFTLocked event
+   * Check if a transfer has been processed
    */
-  private async handleNFTLocked(event: EventLog): Promise<void> {
-    try {
-      const block = await event.getBlock();
-      const [transferId, token, sender, recipient, tokenId] = event.args || [];
-
-      const transferEvent: TransferEvent = {
-        transferId: transferId,
-        sourceChain: ChainType.UNIT0,
-        destinationChain: ChainType.WAVES,
-        token: token,
-        amount: BigInt(1),
-        sender: sender,
-        recipient: recipient,
-        tokenType: TokenType.ERC721,
-        tokenId: BigInt(tokenId),
-        sourceBlockNumber: event.blockNumber,
-        sourceBlockHash: event.blockHash,
-        sourceTxHash: event.transactionHash,
-        timestamp: block.timestamp * 1000,
-        status: 'pending',
-      };
-
-      this.logger.info(`Detected Unit0 NFT lock: ${transferEvent.transferId}`);
-
-      this.emit('transfer', transferEvent);
-    } catch (error) {
-      this.logger.error(`Error processing NFTLocked event:`, error);
-    }
-  }
-
-  /**
-   * Get transfer status from contract
-   */
-  async getTransferStatus(transferId: string): Promise<number> {
-    return this.bridgeContract.getTransferStatus(transferId);
+  async isTransferProcessed(transferId: string): Promise<boolean> {
+    return this.bridgeContract.processedTransfers(transferId);
   }
 
   /**

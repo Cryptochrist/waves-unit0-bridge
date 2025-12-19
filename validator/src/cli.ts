@@ -2,8 +2,8 @@
 
 import { Command } from 'commander';
 import { ethers } from 'ethers';
-import { loadConfig } from './config';
-import { ValidatorNode } from './index';
+import { loadConfig } from './config/index.js';
+import { ValidatorNode } from './index.js';
 
 const program = new Command();
 
@@ -17,6 +17,8 @@ program
   .command('start')
   .description('Start the validator node')
   .option('--log-level <level>', 'Log level (debug, info, warn, error)', 'info')
+  .option('--waves-start-block <height>', 'WAVES block height to start scanning from (overrides saved height)')
+  .option('--unit0-start-block <height>', 'Unit0 block height to start scanning from (overrides saved height)')
   .action(async (options) => {
     console.log('===========================================');
     console.log('    WAVES-Unit0 Bridge Validator Node');
@@ -26,6 +28,16 @@ program
       // Override log level if specified
       if (options.logLevel) {
         process.env.LOG_LEVEL = options.logLevel;
+      }
+
+      // Set start block overrides if specified
+      if (options.wavesStartBlock) {
+        process.env.WAVES_START_BLOCK = options.wavesStartBlock;
+        console.log(`Overriding WAVES start block to: ${options.wavesStartBlock}`);
+      }
+      if (options.unit0StartBlock) {
+        process.env.UNIT0_START_BLOCK = options.unit0StartBlock;
+        console.log(`Overriding Unit0 start block to: ${options.unit0StartBlock}`);
       }
 
       const config = loadConfig();

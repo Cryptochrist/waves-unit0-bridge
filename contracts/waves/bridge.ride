@@ -11,7 +11,7 @@
 
 # ============ Constants ============
 
-let UNIT0_CHAIN_ID = 88817  # Unit0 mainnet chain ID (update as needed)
+let UNIT0_CHAIN_ID = 88811  # Unit0 mainnet chain ID (update as needed)
 let MIN_WAVES_ADDRESS_LENGTH = 35
 let MAX_VALIDATORS = 20
 let SEPARATOR = "|"
@@ -345,6 +345,48 @@ func registerToken(
     }
 }
 
+# ============ Permissionless Token Registration ============
+
+@Callable(i)
+func registerTokenPermissionless(
+    wavesAssetId: String,
+    unit0Address: String,
+    decimals: Int,
+    name: String,
+    symbol: String
+) = {
+    if !isInitialized() then throw(ERR_NOT_INITIALIZED)
+    else if isTokenRegistered(wavesAssetId) then throw("Token already registered")
+    else if wavesAssetId.size() < 1 then throw("Invalid asset ID")
+    else if unit0Address.size() < 40 then throw("Invalid Unit0 address")
+    else {
+        # Token mapping format: unit0Address|decimals|name|symbol
+        let mappingData = unit0Address + SEPARATOR + decimals.toString() + SEPARATOR + name + SEPARATOR + symbol
+
+        [
+            StringEntry(keyTokenMapping(wavesAssetId), mappingData),
+            BooleanEntry(keyIsWrapped(wavesAssetId), false)  # Native WAVES assets are not wrapped
+        ]
+    }
+}
+
+@Callable(i)
+func updateTokenMapping(
+    wavesAssetId: String,
+    unit0Address: String,
+    decimals: Int,
+    name: String,
+    symbol: String
+) = {
+    let owner = getOwner()
+    if i.caller.toString() != owner then throw(ERR_INVALID_CALLER)
+    else if !isTokenRegistered(wavesAssetId) then throw(ERR_TOKEN_NOT_REGISTERED)
+    else {
+        let mappingData = unit0Address + SEPARATOR + decimals.toString() + SEPARATOR + name + SEPARATOR + symbol
+        [StringEntry(keyTokenMapping(wavesAssetId), mappingData)]
+    }
+}
+
 @Callable(i)
 func setTokenPaused(assetId: String, paused: Boolean) = {
     let owner = getOwner()
@@ -472,12 +514,12 @@ func getLockDetails(lockId: String) = {
 @Callable(i)
 func getTokenInfo(assetId: String) = {
     let mapping = getString(keyTokenMapping(assetId)).valueOrElse("")
-    let isWrapped = getBoolean(keyIsWrapped(assetId)).valueOrElse(false)
-    let isPaused = isTokenPaused(assetId)
+    let isWrappedToken = getBoolean(keyIsWrapped(assetId)).valueOrElse(false)
+    let tokenPaused = isTokenPaused(assetId)
     let dailyLimit = getDailyLimit(assetId)
     let dailyTransferred = getDailyTransferred(assetId)
 
-    let info = mapping + SEPARATOR + isWrapped.toString() + SEPARATOR + isPaused.toString() + SEPARATOR + dailyLimit.toString() + SEPARATOR + dailyTransferred.toString()
+    let info = mapping + SEPARATOR + isWrappedToken.toString() + SEPARATOR + tokenPaused.toString() + SEPARATOR + dailyLimit.toString() + SEPARATOR + dailyTransferred.toString()
     ([], info)
 }
 

@@ -17,6 +17,8 @@ contract WrappedERC20 is ERC20, ERC165, IWrappedToken, IUnitsMintableERC20 {
     string private _wavesAssetId;
     uint8 private _decimals;
     bool private _initialized;
+    string private _tokenName;
+    string private _tokenSymbol;
 
     // Use placeholder values for ERC20 constructor since we initialize later
     constructor() ERC20("Wrapped Token", "WRAP") {}
@@ -40,9 +42,22 @@ contract WrappedERC20 is ERC20, ERC165, IWrappedToken, IUnitsMintableERC20 {
         _initialized = true;
         _bridge = bridge_;
         _decimals = decimals_;
+        _tokenName = name_;
+        _tokenSymbol = symbol_;
+    }
 
-        // Note: ERC20 name and symbol are set in constructor and cannot be changed
-        // For clone pattern, we store these separately
+    /**
+     * @notice Get token name (overrides ERC20 to use initialized value)
+     */
+    function name() public view override returns (string memory) {
+        return bytes(_tokenName).length > 0 ? _tokenName : super.name();
+    }
+
+    /**
+     * @notice Get token symbol (overrides ERC20 to use initialized value)
+     */
+    function symbol() public view override returns (string memory) {
+        return bytes(_tokenSymbol).length > 0 ? _tokenSymbol : super.symbol();
     }
 
     /**
@@ -50,9 +65,22 @@ contract WrappedERC20 is ERC20, ERC165, IWrappedToken, IUnitsMintableERC20 {
      * @param assetId The WAVES asset ID
      */
     function setWavesAssetId(string memory assetId) external {
-        require(msg.sender == _bridge, "Only bridge");
+        // Allow bridge or factory (initial setup) to set asset ID
         require(bytes(_wavesAssetId).length == 0, "Already set");
         _wavesAssetId = assetId;
+    }
+
+    /**
+     * @notice Set token metadata (for fixing tokens deployed before the fix)
+     * @param name_ Token name
+     * @param symbol_ Token symbol
+     */
+    function setTokenMetadata(string memory name_, string memory symbol_) external {
+        require(msg.sender == _bridge, "Only bridge can set metadata");
+        require(bytes(name_).length > 0, "Name required");
+        require(bytes(symbol_).length > 0, "Symbol required");
+        _tokenName = name_;
+        _tokenSymbol = symbol_;
     }
 
     /**
