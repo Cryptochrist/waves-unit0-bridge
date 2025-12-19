@@ -112,7 +112,14 @@ program
         throw new Error(`HTTP ${response.status}`);
       }
 
-      const status = await response.json();
+      const status = await response.json() as {
+        isRunning: boolean;
+        validatorAddress: string;
+        wavesHeight: number;
+        unit0Height: number;
+        connectedPeers: number;
+        pendingTransfers: number;
+      };
 
       console.log('===========================================');
       console.log('    Validator Status');
@@ -144,7 +151,12 @@ program
         throw new Error(`HTTP ${response.status}`);
       }
 
-      const stats = await response.json();
+      const stats = await response.json() as {
+        totalTransfers: number;
+        pendingTransfers: number;
+        completedTransfers: number;
+        failedTransfers: number;
+      };
 
       console.log('===========================================');
       console.log('    Transfer Statistics');

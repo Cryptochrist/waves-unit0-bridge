@@ -88,7 +88,7 @@ export class WavesWatcher extends EventEmitter {
     if (!response.ok) {
       throw new Error(`Failed to get WAVES height: ${response.statusText}`);
     }
-    const data = await response.json();
+    const data = await response.json() as { height: number };
     return data.height;
   }
 
@@ -148,7 +148,7 @@ export class WavesWatcher extends EventEmitter {
     if (!response.ok) {
       throw new Error(`Failed to get WAVES block ${height}: ${response.statusText}`);
     }
-    return response.json();
+    return response.json() as Promise<WavesBlock>;
   }
 
   /**
@@ -289,7 +289,7 @@ export class WavesWatcher extends EventEmitter {
     if (!response.ok) {
       throw new Error(`Failed to get transactions: ${response.statusText}`);
     }
-    const data = await response.json();
+    const data = await response.json() as WavesTransaction[][];
     return data[0] || [];
   }
 
@@ -307,7 +307,13 @@ export class WavesWatcher extends EventEmitter {
     if (!response.ok) {
       throw new Error(`Failed to get asset info: ${response.statusText}`);
     }
-    const data = await response.json();
+    const data = await response.json() as {
+      name: string;
+      decimals: number;
+      description: string;
+      quantity: string;
+      reissuable: boolean;
+    };
     return {
       name: data.name,
       decimals: data.decimals,

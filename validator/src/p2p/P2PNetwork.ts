@@ -72,7 +72,7 @@ export class P2PNetwork extends EventEmitter {
         listen: [`/ip4/0.0.0.0/tcp/${this.config.p2pPort}`],
       },
       transports: [tcp()],
-      connectionEncrypters: [noise()],
+      connectionEncryption: [noise()],
       streamMuxers: [yamux()],
       services: {
         identify: identify(),
